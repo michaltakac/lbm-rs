@@ -1,6 +1,6 @@
+use arrayfire::*;
 use num;
 use geometry;
-use io::vtk;
 use grid;
 
 /// TODO: move traits to appropriate modules
@@ -66,16 +66,7 @@ pub trait Physics: Copy + Sync + Send {
         0.0
     }
 
-    fn write<O, F>(
-        &self,
-        vtk_writer: vtk::CellDataWriter,
-        _: O,
-        _: F,
-    ) -> vtk::CellDataWriter
-    where
-        F: Fn(grid::Idx, Self::Distribution) -> num,
-        O: Fn(grid::Idx) -> bool,
-    {
-        vtk_writer
+    fn visualize(&self, win: Window) {
+        unimplemented!();
     }
 }
