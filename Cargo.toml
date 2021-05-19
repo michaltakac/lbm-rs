@@ -2,6 +2,7 @@
 name = "lbm"
 version = "0.1.0"
 authors = ["gnzlbg <gonzalobg88@gmail.com>", "michaltakac <takacmichal92@gmail.com>"]
+edition = "2018"
 
 [dependencies]
 time = "0.1.*"

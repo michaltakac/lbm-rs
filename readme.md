@@ -1,12 +1,5 @@
-# Lattice-Boltzmann Method
+# Lattice-Boltzmann Method on GPUs in Rust
 
-> Big whirls have little whirls that feed on their velocity,
-> and little whirls have lesser whirls and so on to viscosity.
-> - Lewis Fry Richardson.
+This project is a fork of [gnzlbg's](https://github.com/gnzlbg/) implementation of [Lattice Boltzmann solver](https://github.com/gnzlbg/lbm-rs). I liked the general structure of his code.
 
-This crate provides a proof-of-concept implementation of 
-the Lattice-Boltzmann Method in the Rust programming language.
-
-Its aim is to assess Rust capabilities towards the implementation
-of numerical methods for solving systems of partial-differential
-equations.
+This implementation uses ArrayFire library for computations on GPUs. The VTK writer code was removed for and instead real-time visualization with ArrayFire's Forge is used.

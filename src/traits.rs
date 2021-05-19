@@ -1,72 +1,39 @@
 use arrayfire::*;
-use num;
-use geometry;
-use grid;
+use crate::FloatNum;
+use crate::geometry;
+use crate::grid;
 
-/// TODO: move traits to appropriate modules
-
-pub trait Distribution: Sized + Copy + Sync + Send {
-    type Storage: AsRef<[num]> + AsMut<[num]> + Default;
-    type AllIterator: Iterator<Item = Self>;
-    #[inline(always)]
-    fn all() -> Self::AllIterator;
-    #[inline(always)]
-    fn c_squ() -> num;
-    #[inline(always)]
-    fn direction(&self) -> geometry::Direction;
-    #[inline(always)]
-    fn from_direction(geometry::Direction) -> Option<Self>;
-    #[inline(always)]
-    fn constant(&self) -> num;
-    #[inline(always)]
-    fn size() -> usize;
-    #[inline(always)]
-    fn value(&self) -> usize;
-    #[inline(always)]
-    fn center() -> Self;
-    #[inline(always)]
-    fn opposite(&self) -> Self;
+pub trait Simulation {
+    fn set_omega(&mut self);
+    fn set_initial_conditions(&mut self);
 }
 
-pub type DistributionStorage<D> = <D as Distribution>::Storage;
-
-pub trait DirectDistribution: Distribution {
-    type DirectIterator: Iterator<Item = Self>;
-    #[inline(always)]
-    fn direct() -> Self::DirectIterator;
+pub trait Geometry {
+    fn generate(&self, domain: Array<FloatNum>) -> Array<FloatNum>;
 }
 
-pub trait DiagonalDistribution: Distribution {
-    type DiagonalIterator: Iterator<Item = Self>;
-    #[inline(always)]
-    fn diagonal() -> Self::DiagonalIterator;
+pub trait Distribution: Sized + Clone + Sync + Send {
+    fn c_squ() -> FloatNum;
+    fn dims(&self) -> Dim4;
+    fn ex(&self) -> Array<FloatNum>;
+    fn ey(&self) -> Array<FloatNum>;
+    fn weights(&self) -> Array<FloatNum>;
+    fn index() -> Array<u32>;
+    fn opposite_index() -> Array<u32>;
+    fn size() -> u64;
 }
 
-
-pub trait Collision<D: Distribution>: Copy + Sync + Send {
-    #[inline(always)]
-    fn collision<H, IH>(&self, f_hlp: &H, idx_h: IH) -> D::Storage
-    where
-        IH: Fn(&H, D) -> num;
+pub trait Collision<D: Distribution>: Clone + Sync + Send {
+    fn set_omega(&mut self, new_omega: FloatNum);
+    fn collision(&self, f_hlp: &Array<FloatNum>, dims: Dim4);
 }
 
-
-pub trait Physics: Copy + Sync + Send {
+pub trait Physics: Clone + Sync + Send {
     type Distribution: Distribution;
-    #[inline(always)]
-    fn collision<FH, IFH>(
+    fn collision<FH>(
         &self,
         f_h: &FH,
-        idx_f_h: IFH,
-    ) -> DistributionStorage<Self::Distribution>
-    where
-        IFH: Fn(&FH, Self::Distribution) -> num;
-    #[inline(always)]
-    fn integral<F: Fn(Self::Distribution) -> num>(_: F) -> num {
-        0.0
-    }
+    ) -> Array<FloatNum>;
 
-    fn visualize(&self, win: Window) {
-        unimplemented!();
-    }
+    fn visualize(&self);
 }

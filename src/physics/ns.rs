@@ -1,172 +1,134 @@
-//! Navier-Stokes physics
 use std;
-use num;
-use io::vtk;
-use grid;
-use distribution;
+use arrayfire::*;
+use crate::FloatNum;
+use crate::grid;
+use crate::traits::{Distribution, Collision, Physics};
+use crate::distribution::D2Q9;
 
 /// Navier-Stokes distributions:
-pub trait Distribution: ::DirectDistribution + ::DiagonalDistribution {
-    #[inline(always)]
-    fn density<F: Fn(Self) -> num>(f: F) -> num {
-        let mut rho = 0.;
-        for n in Self::all() {
-            rho += f(n);
-        }
-        rho
-    }
+// pub trait NSDistribution {
+//     #[inline(always)]
+//     fn density(f: &Array<FloatNum>, dims: Dim4) -> Array<FloatNum> {
+//         let rho = sum(f, 1);
+//         moddims(&rho, dims)
+//     }
 
-    #[inline(always)]
-    fn pressure<F: Fn(Self) -> num>(f: F) -> num {
-        Self::density(f) * Self::c_squ()
-    }
+//     // #[inline(always)]
+//     // fn pressure(f: &Array<FloatNum>) -> FloatNum {
+//     //     Self::density(f) * Self::c_squ()
+//     // }
 
-    #[inline(always)]
-    fn velocity<F: Fn(Self) -> num>(f: F, d: usize) -> num {
-        let mut tmp = 0.;
-        for n in Self::all() {
-            tmp += n.direction().num_array()[d] * f(n);
-        }
-        tmp / Self::density(f)
-    }
+//     #[inline(always)]
+//     fn velocities(f: &Array<FloatNum>, density: &Array<FloatNum>, dims: Dim4) -> (Array<FloatNum>, Array<FloatNum>) {
+//         let fex = mul(&transpose(&Self::ex(), false), f, true);
+//         let fey = mul(&transpose(&Self::ey(), false), f, true);
 
-    #[inline(always)]
-    fn velocities<F: Fn(Self) -> num>(f: F) -> [num; 2] {
-        [Self::velocity(&f, 0), Self::velocity(&f, 1)]
-    }
-}
+//         let ux = moddims(&(sum(&fex, 1) / density), dims);
+//         let uy = moddims(&(sum(&fey, 1) / density), dims);
+//         (ux, uy)
+//     }
+// }
 
-impl Distribution for distribution::D2Q9 {}
+// impl NSDistribution for D2Q9 {}
+// impl Distribution for D3Q27 {}
 
 /// Single relaxation time (SRT) algorithm
 #[derive(Copy, Clone)]
 pub struct SingleRelaxationTime {
-    pub omega: num,
+    pub omega: FloatNum,
+    pub re: FloatNum,
+    pub nu: FloatNum,
+    pub tau: FloatNum,
 }
 
-impl<D: Distribution> ::Collision<D> for SingleRelaxationTime {
+impl<D: Distribution> Collision<D> for SingleRelaxationTime {
+    // TODO: implement updating of other parameters, not just omega
     #[inline(always)]
-    fn collision<H, IH>(&self, f_hlp: &H, idx_h: IH) -> D::Storage
-    where
-        IH: Fn(&H, D) -> num,
-    {
-        // local density and vel components:
-        let f_h = |n| idx_h(f_hlp, n);
-        let dloc = D::density(&f_h);
-        let [u_x, u_y] = D::velocities(&f_h);
+    fn set_omega(&mut self, new_omega: FloatNum) {
+        self.omega = new_omega
+    }
+    #[inline(always)]
+    fn collision(&self, f_hlp: &Array<FloatNum>, dist: D, dims: Dim4) -> &H {
+        let f_2d = moddims(&f_hlp, dim4!(dims.elements(), D::size()));
 
-        // n- velocity compnents (n = grid node connection vectors)
-        // TODO: switch to 3 speeds only
-        let mut u_n_ = D::Storage::default();
+        let mut density = D::density(&f_2d, dims);
+        let (ux, uy) = D::velocities(&f_2d, &density, dims: Dim4);
+
+        let mut f = f_hlp.clone();
         {
-            let u_n = u_n_.as_mut();
-            for n in D::all() {
-                let v = n.direction().num_array();
-                let n = n.value();
-                u_n[n] = v[0] * u_x + v[1] * u_y;
-            }
+            // Collision
+            let u_sq = flat(&(pow(&ux, &(2.0 as FloatNum), false) + pow(&uy, &(2.0 as FloatNum), false)));
+            let eu = flat(
+                &(&mul(&transpose(&dist.ex(), false), &flat(&ux), true)
+                    + &mul(&transpose(&dist.ey(), false), &flat(&uy), true)),
+            );
+            let feq = flat(&mul(&transpose(&dist.weights(), false), &flat(&density), true))
+                * ((1.0 as FloatNum)
+                    + (3.0 as FloatNum) * &eu
+                    + (4.5 as FloatNum) * (&pow(&eu, &(2.0 as FloatNum), false))
+                    - (1.5 as FloatNum) * (&tile(&flat(&u_sq), dim4!(9))));
 
-            // equilibrium densities:
-            let f0 = 2. * D::c_squ() * D::c_squ();
-            let f1 = 2. * D::c_squ();
-            let u_squ = u_x.powf(2.) + u_y.powf(2.); // square velocity
-            let f2 = u_squ / f1;
-
-            let mut n_equ_ = D::Storage::default();
-            let n_equ = n_equ_.as_mut();
-
-            // zero-th velocity density
-            n_equ[0] = D::center().constant() * dloc * (1. - f2);
-
-            for n in D::direct() {
-                let f3 = n.constant() * dloc;
-                let n = n.value();
-                n_equ[n] =
-                    f3 * (1. + u_n[n] / D::c_squ() + u_n[n].powf(2.) / f0 - f2);
-            }
-            for n in D::diagonal() {
-                let f4 = n.constant() * dloc;
-                let n = n.value();
-                n_equ[n] =
-                    f4 * (1. + u_n[n] / D::c_squ() + u_n[n].powf(2.) / f0 - f2);
-            }
-
-            // relaxation step:
-            for n in D::all() {
-                u_n[n.value()] =
-                    f_h(n) + self.omega * (n_equ[n.value()] - f_h(n));
-            }
+            // Relaxation step
+            f = self.omega * &feq + (1.0 - self.omega) * f_hlp;
         }
-        u_n_
+
+        f
     }
 }
 
-#[derive(Copy, Clone)]
-pub struct NavierStokes<D: Distribution, C: ::Collision<D>> {
-    pub inflow_density: num,
-    pub inflow_accel: num,
+#[derive(Clone)]
+pub struct NavierStokes<D: Distribution, C: Collision<D>> {
+    dims: Dim4,
+    pub inflow_density: FloatNum,
+    pub inflow_accel: FloatNum,
+    pub ux: Array<FloatNum>,
+    pub uy: Array<FloatNum>,
+    pub uz: Array<FloatNum>,
+    pub density: Array<FloatNum>,
     collision: C,
     __dist: std::marker::PhantomData<D>,
 }
 
-
-impl<D: Distribution, C: ::Collision<D>> NavierStokes<D, C> {
-    pub fn new(density: num, accel: num, col: C) -> Self {
+impl<D: Distribution, C: Collision<D>> NavierStokes<D, C> {
+    pub fn new(density: FloatNum, accel: FloatNum, dims: Dim4, col: C) -> Self {
         Self {
+            dims,
             inflow_density: density,
             inflow_accel: accel,
+            ux: constant::<FloatNum>(accel, dims),
+            uy: constant::<FloatNum>(0.0, dims),
+            uz: constant::<FloatNum>(0.0, dims),
+            density: constant::<FloatNum>(density, dims),
             collision: col,
             __dist: std::marker::PhantomData {},
         }
     }
     #[inline(always)]
-    pub fn pressure<F: Fn(D) -> num>(&self, solid: bool, f: F) -> num {
-        if solid {
-            self.inflow_density * D::c_squ()
-        } else {
-            D::pressure(f)
-        }
+    pub fn density(&self, f: &Array<FloatNum>, dims: Dim4) -> Array<FloatNum> {
+        let rho = sum(f, 1);
+        moddims(&rho, self.dims)
     }
     #[inline(always)]
-    pub fn velocities<F: Fn(D) -> num>(solid: bool, f: F) -> [num; 2] {
-        if solid {
-            [0., 0.]
-        } else {
-            D::velocities(f)
-        }
+    pub fn velocities(&mut self, solid_nodes: &Array<bool>, f: &Array<FloatNum>, density: &Array<FloatNum>) -> (Array<FloatNum>, Array<FloatNum>) {
+        let (ux, uy) = D::velocities(f, density, self.dims);
+        
+        let zeros = constant(0.0 as FloatNum, self.dims);
+        let ux = select(&zeros, solid_nodes, &ux);
+        let uy = select(&zeros, solid_nodes, &uy);
+
+        (ux, uy)
     }
 }
 
-impl<D: Distribution, C: ::Collision<D>> ::traits::Physics
+impl<D: Distribution, C: Collision<D>> Physics
     for NavierStokes<D, C> {
     type Distribution = D;
     #[inline(always)]
-    fn collision<H, IH>(&self, f_hlp: &H, idx_h: IH) -> D::Storage
-    where
-        IH: Fn(&H, D) -> num,
-    {
-        self.collision.collision(f_hlp, idx_h)
-    }
-    #[inline(always)]
-    fn integral<F: Fn(D) -> num>(f: F) -> num {
-        D::density(f)
+    fn collision<H>(&self, f_hlp: &H, dims: Dim4) {
+        self.collision.collision(f_hlp, dims);
     }
 
-    fn write<O, F>(
-        &self,
-        mut vtk_writer: vtk::CellDataWriter,
-        obst: O,
-        f: F,
-    ) -> vtk::CellDataWriter
-    where
-        F: Fn(grid::Idx, D) -> num,
-        O: Fn(grid::Idx) -> bool,
-    {
-        vtk_writer.write_scalar("p", |c| self.pressure(obst(c), |n| f(c, n)));
-        vtk_writer
-            .write_scalar("u", |c| Self::velocities(obst(c), |n| f(c, n))[0]);
-        vtk_writer
-            .write_scalar("v", |c| Self::velocities(obst(c), |n| f(c, n))[1]);
-        vtk_writer
+    fn visualize(&self) {
+        unimplemented!();
     }
 }

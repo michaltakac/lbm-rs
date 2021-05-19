@@ -1,18 +1,21 @@
-use geometry::Geometry;
-use grid;
-use num;
+use arrayfire::*;
+use std::collections::HashMap;
+use crate::grid::StructuredGrid;
+use crate::traits::{Geometry, Distribution};
+use crate::geometry::Circle;
+use crate::FloatNum;
 
 #[derive(Copy, Clone, PartialEq, PartialOrd)]
 pub enum Type {
     BounceBack,
-    Inflow(num, num),
+    Inflow(FloatNum, FloatNum),
 }
 
 pub trait AnyCondition: Send + Sync {
     #[inline(always)]
     fn condition(&self) -> Type;
     #[inline(always)]
-    fn contains(&self, grid::X) -> bool;
+    fn contains(&self, x: grid::X) -> bool;
 }
 
 pub struct Condition<T: Geometry + Send + Sync> {
@@ -40,14 +43,40 @@ impl<T: Geometry + Send + Sync> AnyCondition for Condition<T> {
     }
 }
 
-#[derive(Default)]
-pub struct Handler {
-    boundary_conditions: Vec<Box<AnyCondition>>,
+pub struct Handler<D: Distribution> {
+    grid: StructuredGrid<D>,
+    occupied_nodes: Array<FloatNum>,
+    boundary_conditions: HashMap<&'static str, Box<dyn AnyCondition>>,
+    to_reflect: Array<u32>,
+    reflected: Array<u32>,
 }
 
-impl Handler {
-    pub fn push(&mut self, bc: Box<AnyCondition>) {
-        self.boundary_conditions.push(bc);
+impl<D: Distribution> Handler<D> {
+    pub fn new(grid: StructuredGrid<D>) -> Self {
+        Self {
+            grid,
+            boundary_conditions: HashMap::default(),
+            occupied_nodes: constant::<FloatNum>(0.0, grid.dimensions),
+            to_reflect: constant::<u32>(0, grid.dimensions),
+            reflected: constant::<u32>(0, grid.dimensions)
+        }
+    }
+    pub fn add(&mut self, label: &'static str, bc: Box<dyn AnyCondition>) {
+        self.boundary_conditions.insert(label, bc);
+    }
+
+    pub fn update_bounceback_indices(&mut self) {
+        // matrix offset of each Occupied Node
+        let on = locate(&self.occupied_nodes);
+
+        // Bounceback indexes
+        let ci = D::index();
+        let nbi = D::opposite_index();
+
+        self.to_reflect = flat(&tile(&on, dim4!(ci.elements() as u64)))
+            + flat(&tile(&ci, dim4!(on.elements() as u64)));
+        self.reflected = flat(&tile(&on, dim4!(nbi.elements() as u64)))
+            + flat(&tile(&nbi, dim4!(on.elements() as u64)));
     }
 
     #[inline(always)]
@@ -71,92 +100,23 @@ impl Handler {
     }
 
     #[inline(always)]
-    pub fn apply<F, H, IF, IH, D>(
+    pub fn apply<F, H>(
         &self,
-        f: &F,
-        f_hlp: &H,
-        idx_f: IF,
-        idx_h: IH,
-        x: grid::X,
-    ) -> Option<D::Storage>
-    where
-        IF: Fn(&F, D) -> num,
-        IH: Fn(&H, D) -> num,
-        D: ::Distribution,
-    {
-        let mut r: Option<D::Storage> = None;
+        f: &Array<FloatNum>,
+        f_hlp: &Array<FloatNum>,
+    ) -> Array<FloatNum> {
+        let mut r = f.clone();
 
         for bc in &self.boundary_conditions {
-            if !bc.contains(x) {
-                continue;
-            }
             match bc.condition() {
                 Type::BounceBack => {
-                    let mut s = D::Storage::default();
-                    for n in D::all() {
-                        s.as_mut()[n.value()] = idx_h(f_hlp, n.opposite());
-                    }
-                    r = Some(s);
+                    let mut idxrs = Indexer::default();
+                    idxrs.set_index(&self.to_reflect, 0, None);
+                    let bouncedback = index_gen(self.f, idxrs);
+                    eval!(f[self.reflected] = bouncedback);
                 }
                 Type::Inflow(density, accel) => {
-                    let mut s_ = match r {
-                        Some(s) => s,
-                        None => {
-                            let mut s = D::Storage::default();
-                            for n in D::all() {
-                                s.as_mut()[n.value()] = idx_f(f, n);
-                            }
-                            s
-                        }
-                    };
-                    {
-                        let s = s_.as_mut();
-
-                        use geometry::Direction::*;
-                        for n in D::all() {
-                            let t = density * accel * n.constant();
-                            match n.direction() {
-                                W => if s
-                                    [D::from_direction(W).unwrap().value()] -
-                                    t >
-                                    0.
-                                {
-                                    s[D::from_direction(E)
-                                            .unwrap()
-                                            .value()] += t;
-                                    s[D::from_direction(W)
-                                            .unwrap()
-                                            .value()] -= t;
-                                },
-                                NW => if s
-                                    [D::from_direction(NW).unwrap().value()] -
-                                    t >
-                                    0.
-                                {
-                                    s[D::from_direction(SE)
-                                          .unwrap()
-                                          .value()] += t;
-                                    s[D::from_direction(NW)
-                                          .unwrap()
-                                          .value()] -= t;
-                                },
-                                SW => if s
-                                    [D::from_direction(SW).unwrap().value()] -
-                                    t >
-                                    0.
-                                {
-                                    s[D::from_direction(NE)
-                                          .unwrap()
-                                          .value()] += t;
-                                    s[D::from_direction(SW)
-                                          .unwrap()
-                                          .value()] -= t;
-                                },
-                                _ => {}
-                            }
-                        }
-                    }
-                    r = Some(s_);
+                   
                 }
             }
         }
